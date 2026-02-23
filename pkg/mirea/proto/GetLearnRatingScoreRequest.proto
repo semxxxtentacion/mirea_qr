@@ -1,9 +1,0 @@
-syntax = "proto3";
-
-package message;
-
-option go_package = "./proto;message";
-
-message GetLearnRatingScoreRequest {
-  string group = 1;
-}
