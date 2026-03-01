@@ -3,9 +3,10 @@ package app
 import (
 	"errors"
 	"github.com/gofiber/fiber/v3"
+	"mirea-qr/internal/config"
 )
 
-func NewFiber(cfg Config) *fiber.App {
+func NewFiber(cfg config.Config) *fiber.App {
 	return fiber.New(fiber.Config{
 		ErrorHandler: errorHandler(),
 		AppName:      cfg.Name,

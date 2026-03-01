@@ -1,30 +1,30 @@
 package usecase
 
 import (
-        "github.com/redis/go-redis/v9"
-        "context"
-        "mirea-qr/internal/model"
-        "mirea-qr/internal/repository"
+	"context"
+	"github.com/redis/go-redis/v9"
+	"mirea-qr/internal/model"
+	"mirea-qr/internal/repository"
 
-        "github.com/gofiber/fiber/v3"
-        "github.com/sirupsen/logrus"
-        "gorm.io/gorm"
+	"github.com/gofiber/fiber/v3"
+	"github.com/sirupsen/logrus"
+	"gorm.io/gorm"
 )
 
 type AdminUseCase struct {
-        DB               *gorm.DB
-        Log              *logrus.Logger
-        QrScanRepository *repository.QrScanRepository
-        Redis            *redis.Client
+	DB               *gorm.DB
+	Log              *logrus.Logger
+	QrScanRepository *repository.QrScanRepository
+	Redis            *redis.Client
 }
 
 func NewAdminUseCase(db *gorm.DB, logger *logrus.Logger, qrScanRepository *repository.QrScanRepository, redis *redis.Client) *AdminUseCase {
-        return &AdminUseCase{
-                DB:               db,
-                Log:              logger,
-                QrScanRepository: qrScanRepository,
-                Redis:            redis,
-        }
+	return &AdminUseCase{
+		DB:               db,
+		Log:              logger,
+		QrScanRepository: qrScanRepository,
+		Redis:            redis,
+	}
 }
 
 func (c *AdminUseCase) GetStats(ctx context.Context) (*model.AdminStatsResponse, error) {

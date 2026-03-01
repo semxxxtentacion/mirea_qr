@@ -2,8 +2,10 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"mirea-qr/internal/config"
 	entity "mirea-qr/internal/entity"
 	"mirea-qr/internal/model"
 	"mirea-qr/internal/model/converter"
@@ -26,6 +28,7 @@ import (
 )
 
 type UserUseCase struct {
+	Config             *config.Config
 	DB                 *gorm.DB
 	Log                *logrus.Logger
 	Validate           *validator.Validate
@@ -36,8 +39,9 @@ type UserUseCase struct {
 	Encryptor          *crypto.Encryptor
 }
 
-func NewUserUseCase(db *gorm.DB, logger *logrus.Logger, validate *validator.Validate, userRepository *repository.UserRepository, linkUserRepository *repository.LinkUserRepository, redis *redis.Client, bot *tgbotapi.BotAPI, encryptor *crypto.Encryptor) *UserUseCase {
+func NewUserUseCase(cfg *config.Config, db *gorm.DB, logger *logrus.Logger, validate *validator.Validate, userRepository *repository.UserRepository, linkUserRepository *repository.LinkUserRepository, redis *redis.Client, bot *tgbotapi.BotAPI, encryptor *crypto.Encryptor) *UserUseCase {
 	return &UserUseCase{
+		Config:             cfg,
 		DB:                 db,
 		Log:                logger,
 		Validate:           validate,
@@ -65,14 +69,24 @@ func (c *UserUseCase) createUserWithDecryptedPassword(user entity.User) (entity.
 	return userWithDecryptedPassword, nil
 }
 
-func (c *UserUseCase) Create(ctx context.Context, request *model.RegisterUserRequest) (*model.UserResponse, error) {
+const otpPendingTTL = 20 * time.Minute
+const otpPendingKeyPrefix = "otp_pending:"
+
+func otpPendingKey(telegramHash string, telegramId int64) string {
+	if telegramHash != "" {
+		return otpPendingKeyPrefix + telegramHash
+	}
+	return otpPendingKeyPrefix + "id:" + strconv.FormatInt(telegramId, 10)
+}
+
+func (c *UserUseCase) Create(ctx context.Context, request *model.RegisterUserRequest) (*model.UserResponse, *model.OtpRequiredResponse, error) {
 	tx := c.DB.WithContext(ctx).Begin()
 	defer tx.Rollback()
 
 	err := c.Validate.Struct(request)
 	if err != nil {
 		c.Log.Warnf("Invalid request body : %+v", err)
-		return nil, fiber.ErrBadRequest
+		return nil, nil, fiber.ErrBadRequest
 	}
 
 	// Проверяем, не зарегистрирован ли уже пользователь с таким Telegram ID
@@ -82,50 +96,72 @@ func (c *UserUseCase) Create(ctx context.Context, request *model.RegisterUserReq
 		//return nil, fiber.NewError(409, "В боте можно зарегистрироваться только с одного аккаунта Telegram")
 	}
 
-	attendance := mirea.NewAttendance(entity.User{
+	attendance := mirea.NewAttendance(c.Config, entity.User{
 		Email:    request.Email,
 		Password: request.Password,
 	}, c.Redis)
+
+	encryptedPassword, err := c.Encryptor.Encrypt(request.Password)
+	if err != nil {
+		c.Log.Errorf("Failed to encrypt password: %+v", err)
+		return nil, nil, fiber.ErrInternalServerError
+	}
+
 	if err := attendance.Authorization(); err != nil {
 		c.Log.Warnf("Authorization error : %+v", err)
 
-		// Проверяем тип ошибки авторизации
-		if authErr, ok := err.(*customerrors.AuthError); ok {
+		var authErr *customerrors.AuthError
+		if errors.As(err, &authErr) {
 			switch authErr.Type {
 			case "invalid_credentials":
-				return nil, fiber.NewError(403, "Неверный логин или пароль от MIREA")
+				return nil, nil, fiber.NewError(403, "Неверный логин или пароль от MIREA")
 			case "network_error":
-				return nil, fiber.NewError(503, "Сайт MIREA не отвечает")
+				return nil, nil, fiber.NewError(503, "Сайт MIREA не отвечает")
 			case "site_unavailable":
-				return nil, fiber.NewError(503, "Сайт MIREA недоступен")
+				return nil, nil, fiber.NewError(503, "Сайт MIREA недоступен")
 			case "totp_secret_required":
-				return nil, fiber.NewError(400, authErr.Message)
+				return nil, nil, fiber.NewError(400, authErr.Message)
+			case "otp_is_required":
+				loginActionURL := authErr.GetLoginActionUrl()
+				if loginActionURL == "" {
+					return nil, nil, fiber.NewError(500, "Ошибка: ссылка авторизации не получена")
+				}
+
+				otpType := authErr.GetOtpType()
+				key := otpPendingKey(request.TelegramHash, request.TelegramId)
+				pending := model.OtpPendingData{
+					TelegramId:     request.TelegramId,
+					Email:          request.Email,
+					Password:       encryptedPassword,
+					LoginActionURL: loginActionURL,
+					OtpType:        otpType,
+				}
+				if err := c.savePendingOtp(ctx, key, &pending); err != nil {
+					c.Log.Errorf("Failed to save otp pending to Redis: %+v", err)
+					return nil, nil, fiber.ErrInternalServerError
+				}
+				hashForFront := request.TelegramHash
+				if hashForFront == "" {
+					hashForFront = strconv.FormatInt(request.TelegramId, 10)
+				}
+				return nil, &model.OtpRequiredResponse{OtpRequired: true, TelegramHash: hashForFront, OtpType: otpType}, nil
 			default:
-				return nil, fiber.NewError(500, "Ошибка авторизации в системе MIREA")
+				return nil, nil, fiber.NewError(500, "Ошибка авторизации в системе MIREA")
 			}
 		}
-
-		// Если это не AuthError, возвращаем общую ошибку
-		return nil, fiber.NewError(500, "Ошибка авторизации в системе MIREA")
+		return nil, nil, fiber.NewError(500, "Ошибка авторизации в системе MIREA")
 	}
 
 	student, err := attendance.GetMeInfo()
 	if err != nil {
 		c.Log.Errorf("Failed get me info : %+v", err)
-		return nil, fiber.ErrInternalServerError
+		return nil, nil, fiber.ErrInternalServerError
 	}
 
 	group, err := attendance.GetAvailableGroup()
 	if err != nil {
 		c.Log.Errorf("Failed get group : %+v", err)
-		return nil, fiber.ErrInternalServerError
-	}
-
-	// Encrypt password before saving
-	encryptedPassword, err := c.Encryptor.Encrypt(request.Password)
-	if err != nil {
-		c.Log.Errorf("Failed to encrypt password: %+v", err)
-		return nil, fiber.ErrInternalServerError
+		return nil, nil, fiber.ErrInternalServerError
 	}
 
 	fullname := strings.Join([]string{student.GetFullname(), student.GetName(), student.GetMiddlename().GetValue()}, " ")
@@ -135,7 +171,7 @@ func (c *UserUseCase) Create(ctx context.Context, request *model.RegisterUserReq
 		user.GroupID = group.UUID
 		if err := c.UserRepository.Update(tx, user); err != nil {
 			c.Log.Warnf("Failed update user to database : %+v", err)
-			return nil, fiber.NewError(500, err.Error())
+			return nil, nil, fiber.NewError(500, err.Error())
 		}
 	} else {
 		user = &entity.User{
@@ -151,16 +187,131 @@ func (c *UserUseCase) Create(ctx context.Context, request *model.RegisterUserReq
 
 		if err := c.UserRepository.Create(tx, user); err != nil {
 			c.Log.Warnf("Failed create user to database : %+v", err)
-			return nil, fiber.NewError(500, err.Error())
+			return nil, nil, fiber.NewError(500, err.Error())
 		}
 	}
 
 	if err := tx.Commit().Error; err != nil {
 		c.Log.Warnf("Failed commit transaction : %+v", err)
+		return nil, nil, fiber.ErrInternalServerError
+	}
+
+	return converter.UserToResponse(user), nil, nil
+}
+
+func (c *UserUseCase) savePendingOtp(ctx context.Context, key string, pending *model.OtpPendingData) error {
+	data, err := json.Marshal(pending)
+	if err != nil {
+		return err
+	}
+	return c.Redis.Set(ctx, key, data, otpPendingTTL).Err()
+}
+
+// SubmitOtp завершает регистрацию после ввода OTP: находит данные в Redis, отправляет код по ссылке, создаёт пользователя.
+func (c *UserUseCase) SubmitOtp(ctx context.Context, request *model.SubmitOtpRequest) (*model.UserResponse, error) {
+	if request.TelegramHash == "" {
+		return nil, fiber.NewError(400, "telegram_hash обязателен")
+	}
+	var key string
+	allDigits := true
+	for _, r := range request.TelegramHash {
+		if r < '0' || r > '9' {
+			allDigits = false
+			break
+		}
+	}
+	if allDigits {
+		key = otpPendingKeyPrefix + "id:" + request.TelegramHash
+	} else {
+		key = otpPendingKeyPrefix + request.TelegramHash
+	}
+	data, err := c.Redis.Get(ctx, key).Bytes()
+	if err != nil {
+		c.Log.Warnf("Otp pending not found or expired: %+v", err)
+		return nil, fiber.NewError(404, "Сессия истекла или не найдена. Повторите вход.")
+	}
+	var pending model.OtpPendingData
+	if err := json.Unmarshal(data, &pending); err != nil {
+		c.Log.Warnf("Invalid otp pending data: %+v", err)
 		return nil, fiber.ErrInternalServerError
 	}
 
-	return converter.UserToResponse(user), nil
+	attendance := mirea.NewAttendance(c.Config, entity.User{
+		Email: pending.Email,
+	}, c.Redis)
+	attendance.SetUseCase(false)
+	otpType := pending.OtpType
+	if otpType == "" {
+		otpType = "email"
+	}
+
+	if err := attendance.HandleTwoFactorAuth(pending.LoginActionURL, request.OtpCode, otpType); err != nil {
+		var authErr *customerrors.AuthError
+		if errors.As(err, &authErr) && authErr.Type == "otp_code_is_wrong" {
+			loginActionURL := authErr.GetLoginActionUrl()
+			otpTypeFromErr := authErr.GetOtpType()
+			if loginActionURL != "" {
+				pending.LoginActionURL = loginActionURL
+				pending.OtpType = otpTypeFromErr
+				_ = c.savePendingOtp(ctx, key, &pending)
+			}
+			return nil, fiber.NewError(400, "Неверный код OTP")
+		}
+		c.Log.Warnf("HandleTwoFactorAuth error: %+v", err)
+		return nil, fiber.NewError(400, err.Error())
+	}
+
+	student, err := attendance.GetMeInfo()
+	if err != nil {
+		c.Log.Errorf("Failed get me info after OTP: %+v", err)
+		return nil, fiber.ErrInternalServerError
+	}
+	group, err := attendance.GetAvailableGroup()
+	if err != nil {
+		c.Log.Errorf("Failed get group after OTP: %+v", err)
+		return nil, fiber.ErrInternalServerError
+	}
+
+	tx := c.DB.WithContext(ctx).Begin()
+	defer tx.Rollback()
+
+	fullname := strings.Join([]string{student.GetFullname(), student.GetName(), student.GetMiddlename().GetValue()}, " ")
+
+	existingUser := new(entity.User)
+	if err := c.UserRepository.FindByEmail(tx, existingUser, pending.Email); err == nil {
+		existingUser.TelegramId = pending.TelegramId
+		existingUser.Group = group.Title
+		existingUser.GroupID = group.UUID
+		if err := c.UserRepository.Update(tx, existingUser); err != nil {
+			c.Log.Warnf("Failed update user: %+v", err)
+			return nil, fiber.ErrInternalServerError
+		}
+		if err := tx.Commit().Error; err != nil {
+			return nil, fiber.ErrInternalServerError
+		}
+		_ = c.Redis.Del(ctx, key)
+		return converter.UserToResponse(existingUser), nil
+	}
+
+	newUser := &entity.User{
+		ID:         student.Id,
+		TelegramId: pending.TelegramId,
+		Email:      strings.ToLower(pending.Email),
+		Password:   pending.Password,
+		Fullname:   fullname,
+		Group:      group.Title,
+		GroupID:    group.UUID,
+		UserAgent:  browser.Mobile(),
+	}
+	if err := c.UserRepository.Create(tx, newUser); err != nil {
+		c.Log.Warnf("Failed create user: %+v", err)
+		return nil, fiber.ErrInternalServerError
+	}
+	if err := tx.Commit().Error; err != nil {
+		return nil, fiber.ErrInternalServerError
+	}
+	_ = c.Redis.Del(ctx, key)
+	return converter.UserToResponse(newUser), nil
 }
 
 func (c *UserUseCase) UpdateDataForUser(user *entity.User) error {
@@ -172,7 +323,7 @@ func (c *UserUseCase) UpdateDataForUser(user *entity.User) error {
 		return errors.New("failed to decrypt password")
 	}
 
-	attendance := mirea.NewAttendance(userWithDecryptedPassword, c.Redis)
+	attendance := mirea.NewAttendance(c.Config, userWithDecryptedPassword, c.Redis)
 	if err := attendance.Authorization(); err != nil {
 		c.Log.Warnf("Wrong login or password from mirea : %+v", err)
 		return errors.New("wrong login or password")
@@ -384,7 +535,7 @@ func (c *UserUseCase) ChangePassword(ctx context.Context, request *model.ChangeP
 	// Проверяем новый пароль
 	user.Password = request.NewPassword
 
-	newAttendance := mirea.NewAttendance(user, c.Redis)
+	newAttendance := mirea.NewAttendance(c.Config, user, c.Redis)
 	newAttendance.SetUseCase(false)
 	if err := newAttendance.Authorization(); err != nil {
 		c.Log.Warnf("Wrong new password : %+v", err)
@@ -478,7 +629,7 @@ func (c *UserUseCase) GetUniversityStatus(ctx context.Context, user *entity.User
 		return nil, fiber.NewError(500, "Не удалось расшифровать пароль")
 	}
 
-	attendance := mirea.NewAttendance(userWithDecryptedPassword, c.Redis)
+	attendance := mirea.NewAttendance(c.Config, userWithDecryptedPassword, c.Redis)
 
 	if err := attendance.Authorization(); err != nil {
 		c.Log.Warnf("Failed to authorize attendance : %+v", err)
@@ -642,7 +793,7 @@ func (c *UserUseCase) UpdateTotpSecret(ctx context.Context, request *model.Updat
 
 	testUser := userWithDecryptedPassword
 	testUser.TotpSecret = request.TotpSecret
-	attendance := mirea.NewAttendance(testUser, c.Redis)
+	attendance := mirea.NewAttendance(c.Config, testUser, c.Redis)
 	attendance.SetUseCase(false)
 
 	if err := attendance.Authorization(); err != nil {

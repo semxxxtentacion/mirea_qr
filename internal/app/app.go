@@ -1,6 +1,7 @@
 package app
 
 import (
+	"mirea-qr/internal/config"
 	"mirea-qr/internal/handler"
 	"mirea-qr/internal/handler/middleware"
 	"mirea-qr/internal/handler/route"
@@ -20,7 +21,7 @@ type BootstrapConfig struct {
 	DB        *gorm.DB
 	App       *fiber.App
 	Log       *logrus.Logger
-	Cfg       Config
+	Cfg       config.Config
 	Redis     *redis.Client
 	Validator *validator.Validate
 	Bot       *tgbotapi.BotAPI
@@ -37,8 +38,8 @@ func Bootstrap(boot BootstrapConfig) route.RouteConfig {
 	teacherReviewRepository := repository.NewTeacherReviewRepository(boot.Log)
 
 	// setup use cases
-	userUseCase := usecase.NewUserUseCase(boot.DB, boot.Log, boot.Validator, userRepository, linkUserRepository, boot.Redis, boot.Bot, boot.Encryptor)
-	mireaUseCase := usecase.NewMireaUseCase(boot.DB, boot.Log, boot.Validator, userRepository, linkUserRepository, subjectAttendanceRepository, boot.Redis, boot.Bot, boot.Encryptor)
+	userUseCase := usecase.NewUserUseCase(&boot.Cfg, boot.DB, boot.Log, boot.Validator, userRepository, linkUserRepository, boot.Redis, boot.Bot, boot.Encryptor)
+	mireaUseCase := usecase.NewMireaUseCase(&boot.Cfg, boot.DB, boot.Log, boot.Validator, userRepository, linkUserRepository, subjectAttendanceRepository, boot.Redis, boot.Bot, boot.Encryptor)
 	adminUseCase := usecase.NewAdminUseCase(boot.DB, boot.Log, qrScanRepository, boot.Redis)
 	reviewUseCase := usecase.NewReviewUseCase(boot.DB, boot.Log, boot.Validator, userRepository, teacherRepository, teacherReviewRepository)
 

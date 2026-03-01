@@ -2,10 +2,11 @@ package app
 
 import (
 	"github.com/go-playground/validator/v10"
+	"mirea-qr/internal/config"
 	"strings"
 )
 
-func NewValidator(cfg Config) *validator.Validate {
+func NewValidator(cfg config.Config) *validator.Validate {
 	validate := validator.New()
 
 	err := validate.RegisterValidation("mireaDomain", mireaDomain)

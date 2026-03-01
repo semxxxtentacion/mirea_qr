@@ -6,13 +6,19 @@ import { useState, useEffect, createContext, useContext } from "react"
 import { apiClient, type User } from "@/lib/api"
 import { initTelegramWebApp, isTelegramMiniApp } from "@/lib/telegram"
 
+export type SignUpResult = { otpRequired: true; telegramHash: string; otpType: string } | void
+
 interface AuthContextType {
   user: User | null
   isLoading: boolean
   isAuthenticated: boolean
   isTelegramWebApp: boolean
   isTelegramWidget: boolean
-  signUp: (email: string, password: string) => Promise<void>
+  pendingOtpTelegramHash: string | null
+  pendingOtpType: string | null
+  clearPendingOtp: () => void
+  signUp: (email: string, password: string) => Promise<SignUpResult>
+  submitOtp: (telegramHash: string, otpCode: string) => Promise<void>
   signOut: () => void
   refreshUser: () => Promise<void>
   setWebAppUser: (user: any) => void
@@ -33,6 +39,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState(true)
   const [isTelegramWebApp, setIsTelegramWebApp] = useState(false)
   const [isTelegramWidget, setIsTelegramWidget] = useState(false)
+  const [pendingOtpTelegramHash, setPendingOtpTelegramHash] = useState<string | null>(null)
+  const [pendingOtpType, setPendingOtpType] = useState<string | null>(null)
 
   const refreshUser = async () => {
     try {
@@ -44,14 +52,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
-  const signUp = async (email: string, password: string) => {
-    try {
-      const response = await apiClient.signUp({ email, password })
-      setUser(response.data)
-    } catch (error) {
-      console.error("Sign up failed:", error)
-      throw error
+  const signUp = async (email: string, password: string): Promise<SignUpResult> => {
+    const response = (await apiClient.signUp({ email, password })) as unknown as Record<string, unknown>
+    if (response && response.otp_required) {
+      const rawOtpType = response.otp_type ?? response["otp_type"]
+      const otpType = rawOtpType === "max" ? "max" : "email"
+      setPendingOtpTelegramHash(String(response.telegram_hash ?? response["telegram_hash"] ?? ""))
+      setPendingOtpType(otpType)
+      return {
+        otpRequired: true,
+        telegramHash: String(response.telegram_hash ?? response["telegram_hash"] ?? ""),
+        otpType,
+      }
     }
+    setUser((response?.data as User) ?? null)
+  }
+
+  const submitOtp = async (telegramHash: string, otpCode: string) => {
+    const response = await apiClient.submitOtp(telegramHash, otpCode)
+    setPendingOtpTelegramHash(null)
+    setPendingOtpType(null)
+    setUser(response.data)
+  }
+
+  const clearPendingOtp = () => {
+    setPendingOtpTelegramHash(null)
+    setPendingOtpType(null)
   }
 
   const signOut = () => {
@@ -139,7 +165,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     isAuthenticated: !!user,
     isTelegramWebApp,
     isTelegramWidget,
+    pendingOtpTelegramHash,
+    pendingOtpType,
+    clearPendingOtp,
     signUp,
+    submitOtp,
     signOut,
     refreshUser,
     setWebAppUser,

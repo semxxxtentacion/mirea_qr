@@ -21,7 +21,8 @@ export function RouteGuard({ children }: RouteGuardProps) {
     isAuthenticated, 
     isTelegramWebApp, 
     isTelegramWidget, 
-    setWebAppUser 
+    setWebAppUser,
+    signUp,
   } = useAuth()
   const { isAdmin } = useAdmin()
 
@@ -57,16 +58,52 @@ export function RouteGuard({ children }: RouteGuardProps) {
     </>
   }
 
-  // If user is in Telegram WebApp but not registered, show sign up form
+  const devTestUserId = process.env.NEXT_PUBLIC_DEV_AUTH_USER_ID
+  const devTestHash = process.env.NEXT_PUBLIC_DEV_AUTH_HASH
+  const devTestLogin = process.env.NEXT_PUBLIC_DEV_AUTH_LOGIN
+  const devTestPassword = process.env.NEXT_PUBLIC_DEV_AUTH_PASSWORD
+  const devTestUser =
+    devTestUserId && devTestHash
+      ? { id: Number(devTestUserId), hash: devTestHash }
+      : null
+  const showDevAuth =
+    (process.env.NODE_ENV === "development" ||
+      ["true", "1"].includes(
+        String(process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH ?? "").toLowerCase()
+      )) &&
+    !!devTestUser &&
+    !!devTestLogin &&
+    !!devTestPassword
+
+  // If user is in Telegram WebApp but not registered, show sign up form + тестовый вход в dev
   if (isTelegramWebApp) {
     return (
-      <div className="min-h-screen bg-background relative z-10">
+      <div className="min-h-screen bg-background relative z-10 flex flex-col items-center justify-center p-4">
         <SignUpForm />
+        {showDevAuth && (
+          <div className="mt-4 text-center">
+            <button
+              type="button"
+              onClick={async () => {
+                if (!devTestUser || !devTestLogin || !devTestPassword) return
+                await setWebAppUser(devTestUser)
+                try {
+                  await signUp(devTestLogin, devTestPassword)
+                } catch (e) {
+                  console.error("Тестовый signUp failed:", e)
+                }
+              }}
+              className="text-sm text-muted-foreground underline hover:text-foreground"
+            >
+              Тестовый вход (без Telegram)
+            </button>
+          </div>
+        )}
       </div>
     )
   }
 
-  // If user is in regular browser and not authenticated via Telegram Widget
+  // If user is in regular browser and not authenticated via Telegram Widget — только виджет
   if (!isTelegramWidget) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center p-4 relative z-10">

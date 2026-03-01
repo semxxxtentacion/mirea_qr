@@ -1,5 +1,6 @@
-// API client for MIREA backend
-const API_BASE_URL = "https://t-mirea.ru/api"
+// API client for MIREA backend (URL из env API_BASE_URL при сборке, пробрасывается через next.config)
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "https://t-mirea.ru/api"
 
 export interface User {
   id: string
@@ -17,6 +18,14 @@ export interface ApiResponse<T> {
   data: T
   paging?: any
   errors?: string
+}
+
+/** Ответ sign-up при необходимости ввода OTP (6 цифр). otp_type: "email" | "max" */
+export interface OtpRequiredResponse {
+  data: null
+  otp_required: true
+  telegram_hash: string
+  otp_type: string
 }
 
 export interface SignUpRequest {
@@ -241,7 +250,7 @@ class ApiClient {
     return response.json()
   }
 
-  async signUp(data: SignUpRequest): Promise<ApiResponse<User>> {
+  async signUp(data: SignUpRequest): Promise<ApiResponse<User> | OtpRequiredResponse> {
     const body: any = {
       email: data.email,
       password: data.password,
@@ -250,6 +259,13 @@ class ApiClient {
     return this.request<User>("/sign-up", {
       method: "POST",
       body: JSON.stringify(body),
+    }) as Promise<ApiResponse<User> | OtpRequiredResponse>
+  }
+
+  async submitOtp(telegramHash: string, otpCode: string): Promise<ApiResponse<User>> {
+    return this.request<User>("/submit-otp", {
+      method: "POST",
+      body: JSON.stringify({ telegram_hash: telegramHash, otp_code: otpCode }),
     })
   }
 

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"github.com/gofiber/fiber/v3/log"
 	"mirea-qr/internal/entity"
 	"mirea-qr/internal/handler/middleware"
 	"mirea-qr/internal/model"
@@ -25,22 +26,49 @@ func NewUserController(useCase *usecase.UserUseCase, logger *logrus.Logger) *Use
 }
 
 func (c *UserController) Register(ctx fiber.Ctx) error {
-	user := middleware.GetTelegramId(ctx)
 	request := new(model.RegisterUserRequest)
-
+	log.Debug(*request)
 	if err := ctx.Bind().JSON(request); err != nil {
 		c.Log.Warnf("Failed to parse request body : %+v", err)
 		return fiber.ErrBadRequest
 	}
+	request.TelegramId = middleware.GetTelegramId(ctx)
+	request.TelegramHash = middleware.GetTelegramHash(ctx)
 
-	request.TelegramId = user
-
-	response, err := c.UseCase.Create(ctx.UserContext(), request)
+	response, otpRequired, err := c.UseCase.Create(ctx.UserContext(), request)
 	if err != nil {
 		c.Log.Warnf("Failed to register user : %+v", err)
 		return err
 	}
+	if otpRequired != nil {
+		otpType := otpRequired.OtpType
+		if otpType != "max" {
+			otpType = "email"
+		}
+		return ctx.JSON(fiber.Map{
+			"data":          nil,
+			"otp_required":  otpRequired.OtpRequired,
+			"telegram_hash": otpRequired.TelegramHash,
+			"otp_type":      otpType,
+		})
+	}
+	return ctx.JSON(model.WebResponse[*model.UserResponse]{Data: response})
+}
 
+func (c *UserController) SubmitOtp(ctx fiber.Ctx) error {
+	request := new(model.SubmitOtpRequest)
+	if err := ctx.Bind().JSON(request); err != nil {
+		c.Log.Warnf("Failed to parse submit-otp body: %+v", err)
+		return fiber.ErrBadRequest
+	}
+	if err := c.UseCase.Validate.Struct(request); err != nil {
+		return fiber.ErrBadRequest
+	}
+	response, err := c.UseCase.SubmitOtp(ctx.UserContext(), request)
+	if err != nil {
+		c.Log.Warnf("SubmitOtp failed: %+v", err)
+		return err
+	}
 	return ctx.JSON(model.WebResponse[*model.UserResponse]{Data: response})
 }
 

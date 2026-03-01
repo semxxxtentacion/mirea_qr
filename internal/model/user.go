@@ -26,9 +26,31 @@ type ConnectedStudentResponse struct {
 }
 
 type RegisterUserRequest struct {
-	TelegramId int64  `json:"-"`
-	Email      string `json:"email" validate:"required,email,mireaDomain"`
-	Password   string `json:"password" validate:"required,max=100"`
+	TelegramId   int64  `json:"-"`
+	TelegramHash string `json:"-"` // из middleware (webAppUser.hash)
+	Email        string `json:"email" validate:"required,email,mireaDomain"`
+	Password     string `json:"password" validate:"required,max=100"`
+}
+
+// OtpRequiredResponse — ответ sign-up при необходимости ввода OTP
+type OtpRequiredResponse struct {
+	OtpRequired  bool   `json:"otp_required"`
+	TelegramHash string `json:"telegram_hash"`
+	OtpType      string `json:"otp_type"` // "email" | "max"
+}
+
+type SubmitOtpRequest struct {
+	OtpCode      string `json:"otp_code" validate:"required,len=6"`
+	TelegramHash string `json:"telegram_hash" validate:"required"`
+}
+
+// OtpPendingData — данные в Redis при ожидании OTP (ключ: otp_pending:<telegram_hash>)
+type OtpPendingData struct {
+	TelegramId     int64  `json:"telegram_id"`
+	Email          string `json:"email"`
+	Password       string `json:"password"`
+	LoginActionURL string `json:"login_action_url"`
+	OtpType        string `json:"otp_type"` // "email" | "max"
 }
 
 type LoginUserRequest struct {

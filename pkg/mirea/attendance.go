@@ -7,26 +7,45 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/net/publicsuffix"
 	"log"
+	"mirea-qr/internal/config"
 	"mirea-qr/internal/entity"
 	"mirea-qr/pkg/customerrors"
 	message "mirea-qr/pkg/mirea/proto"
 	"mirea-qr/pkg/proxy"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/pquerna/otp/totp"
 	"github.com/redis/go-redis/v9"
 	"resty.dev/v3"
 )
 
 var proxyBlockedErr = errors.New("proxy blocked")
 
+// URL-ы MIREA, для которых сохраняем/восстанавливаем cookies из Redis
+var mireaSessionURLs = []*url.URL{
+	mustParseURL("https://attendance.mirea.ru"),
+	mustParseURL("https://attendance-app.mirea.ru"),
+	mustParseURL("https://attendance.mirea.ru/api/mireaauth"),
+	mustParseURL("https://sso.mirea.ru/realms/mirea/"),
+}
+
+func mustParseURL(s string) *url.URL {
+	u, err := url.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+	return u
+}
+
 type Attendance struct {
+	config       *config.Config
 	user         entity.User
 	appVersion   string
 	client       *resty.Client
@@ -45,13 +64,16 @@ type GroupResponse struct {
 	Title string
 }
 
-func NewAttendance(user entity.User, redis *redis.Client) *Attendance {
+func NewAttendance(cfg *config.Config, user entity.User, redis *redis.Client) *Attendance {
 	client := resty.New()
+	jar, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 
+	client.SetCookieJar(jar)
 	client.SetHeader("User-Agent", user.UserAgent)
 	client.SetTimeout(10 * time.Second)
 
 	a := &Attendance{
+		config:     cfg,
 		user:       user,
 		appVersion: "1.6.0+5227", // TODO: automatic parse
 		client:     client,
@@ -59,7 +81,10 @@ func NewAttendance(user entity.User, redis *redis.Client) *Attendance {
 		useCache:   true,
 		retryCount: 0,
 	}
-	a.SetProxy()
+
+	if a.config.UseProxy {
+		a.SetProxy()
+	}
 
 	return a
 }
@@ -83,25 +108,53 @@ func (a *Attendance) GetCurrentUser() entity.User {
 	return a.user
 }
 
-// saveSessionToRedis сохраняет сессию в redis
+// saveSessionToRedis сохраняет сессию в redis. Cookie из jar часто приходят без Domain/Path —
+// подставляем их из URL, по которому запрашивали, чтобы в JSON и при загрузке всё было задано.
 func (a *Attendance) saveSessionToRedis() error {
 	ctx := context.Background()
-	u, _ := url.Parse("https://attendance.mirea.ru") // .AspNetCore.Cookies - по сути только это нужно
-	cookies := a.client.CookieJar().Cookies(u)
+	jar := a.client.CookieJar()
+	seen := make(map[string]struct{})
+	var all []*http.Cookie
+	for _, u := range mireaSessionURLs {
 
-	session := RestySession{
-		Cookies: cookies,
+		for _, c := range jar.Cookies(u) {
+			domain := u.Hostname()
+			path := u.Path
+			if path == "" {
+				path = "/"
+			}
+			key := c.Name + "|" + domain + "|" + path
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			// Копируем cookie и явно задаём Domain/Path (в jar они часто пустые)
+			cp := *c
+			cp.Domain = domain
+			cp.Path = path
+			cp.HttpOnly = true
+			cp.Secure = true
+			cp.MaxAge = 3600 * 24 * 400 // 400 days
+			cp.SameSite = http.SameSiteNoneMode
+			cp.Expires = time.Now().AddDate(1, 0, 0)
+			all = append(all, &cp)
+
+		}
 	}
 
+	if len(all) == 0 {
+		return nil
+	}
+
+	session := RestySession{Cookies: all}
 	data, err := json.Marshal(session)
 	if err != nil {
 		return err
 	}
-
 	return a.redis.Set(ctx, a.getSessionKeyToRedis(), data, 7*24*time.Hour).Err()
 }
 
-// loadSessionFromRedis восстанавливает сессию из redis
+// loadSessionFromRedis восстанавливает сессию из redis: раскладывает cookies в jar с учётом Domain и Path
 func (a *Attendance) loadSessionFromRedis() error {
 	ctx := context.Background()
 	data, err := a.redis.Get(ctx, a.getSessionKeyToRedis()).Bytes()
@@ -109,13 +162,35 @@ func (a *Attendance) loadSessionFromRedis() error {
 	if err != nil {
 		return err
 	}
-
 	var session RestySession
 	if err := json.Unmarshal(data, &session); err != nil {
 		return err
 	}
+	jar := a.client.CookieJar()
 
-	a.client.SetCookies(session.Cookies)
+	for _, c := range session.Cookies {
+		if c == nil {
+			continue
+		}
+
+		host := strings.TrimPrefix(strings.TrimSpace(c.Domain), ".")
+		if host == "" {
+			continue
+		}
+		path := c.Path
+		if path == "" {
+			path = "/"
+		}
+		if len(path) > 0 && path[0] != '/' {
+			path = "/" + path
+		}
+		u, err := url.Parse("https://" + host + path)
+		if err != nil {
+			continue
+		}
+		jar.SetCookies(u, []*http.Cookie{c})
+	}
+
 	return nil
 }
 
@@ -159,6 +234,19 @@ func (a *Attendance) Authorization() error {
 		a.retryCount++
 		return a.Authorization()
 	}
+	redirects := resp.RedirectHistory()
+
+	resp, err = a.client.
+		SetHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.75.14 (KHTML, like Gecko) Version/7.0.3 Safari/7046A194A").
+		R().
+		Get(redirects[0].URL)
+	if err != nil {
+		if a.currentProxy != "" {
+			_ = proxy.BlockProxy(a.redis, a.currentProxy, 30*time.Second)
+		}
+		a.retryCount++
+		return a.Authorization()
+	}
 
 	loginActionURL, err := a.getLoginActionURL(resp.String())
 	if err != nil {
@@ -170,18 +258,36 @@ func (a *Attendance) Authorization() error {
 		return err
 	}
 
-	redirects := loginResp.RedirectHistory()
+	redirects = loginResp.RedirectHistory()
 	if len(redirects) == 0 {
 		return customerrors.NewAuthError("invalid_credentials", "Неверный логин или пароль от MIREA", errors.New("not redirected after authorization"))
 	}
 
-	if redirects[0].URL != "https://attendance-app.mirea.ru/services" {
-		if !strings.Contains(loginResp.String(), `"helpText": "otp-help-text"`) {
-			return customerrors.NewAuthError("invalid_credentials", "Неверный логин или пароль от MIREA", errors.New("unexpected redirect, not two-factor auth"))
-		}
+	if err := a.saveSessionToRedis(); err != nil {
+		return customerrors.NewAuthError("internal_error", "Система кеша не отвечает", err)
+	}
 
-		if err := a.handleTwoFactorAuth(loginResp); err != nil {
-			return err
+	if redirects[0].URL != "https://attendance-app.mirea.ru/services" {
+		loginRespStr := loginResp.String()
+		if strings.Contains(loginRespStr, `"pageId": "email-code-form"`) ||
+			strings.Contains(loginRespStr, `"pageId": "login-max-otp"`) {
+			otpType := "email"
+			if strings.Contains(loginRespStr, `"pageId": "login-max-otp"`) {
+				otpType = "max"
+			}
+
+			loginActionURL, err = a.getLoginActionURL(loginRespStr)
+			if err != nil {
+				return err
+			}
+
+			return customerrors.NewAuthError(
+				"otp_is_required",
+				"Необходим OTP код",
+				errors.New("opt code is required"),
+			).SetLoginActionUrl(loginActionURL).SetOtpType(otpType)
+		} else {
+			return customerrors.NewAuthError("invalid_credentials", "Неверный логин или пароль от MIREA", errors.New("unexpected redirect, not two-factor auth"))
 		}
 	}
 
@@ -190,10 +296,6 @@ func (a *Attendance) Authorization() error {
 		return customerrors.NewAuthError("invalid_credentials", "Неверный логин или пароль от MIREA", errors.New("failed get group, because not authorized"))
 	}
 	a.user.GroupID = group.UUID
-
-	if err := a.saveSessionToRedis(); err != nil {
-		return customerrors.NewAuthError("internal_error", "Система кеша не отвечает", err)
-	}
 
 	return nil
 }
@@ -247,49 +349,75 @@ func (a *Attendance) performLogin(loginActionURL string) (*resty.Response, error
 	return resp, nil
 }
 
-// handleTwoFactorAuth обрабатывает двухфакторную авторизацию
-func (a *Attendance) handleTwoFactorAuth(loginResp *resty.Response) error {
-	if a.user.TotpSecret == "" {
-		return customerrors.NewAuthError("totp_secret_required", "Требуется двухфакторная авторизация, но секрет TOTP не установлен", errors.New("totp secret is empty"))
-	}
+// HandleTwoFactorAuth обрабатывает двухфакторную авторизацию (отправка кода по ссылке).
+// otpType: "email" — поле emailCode, "max" — поле code. Может вернуть AuthError с типом "otp_code_is_wrong" при неверном коде.
+func (a *Attendance) HandleTwoFactorAuth(loginActionURL string, code string, otpType string) error {
 
-	loginActionURL, err := a.getLoginActionURL(loginResp.String())
+	err := a.loadSessionFromRedis()
+
 	if err != nil {
-		return customerrors.NewAuthError("site_error", "Ошибка login_action при двух факторной авторизации", errors.New("login_action not found in two auth page"))
+		return customerrors.NewAuthError("session_error", "Ошибка получения сессии", err)
 	}
 
-	// Получаем credentialId из ответа (ищем блок с userLabel: "Google Android" и извлекаем id)
-	reCredId := regexp.MustCompile(`(?s)"userLabel":\s*"Google Android".*?"id":\s*"(.*?)"`)
-	matchCredId := reCredId.FindStringSubmatch(loginResp.String())
-	if len(matchCredId) < 2 {
-		return customerrors.NewAuthError("site_error", "Ошибка получения credentialId для двухфакторной аутентификации", errors.New("credentialId not found"))
+	formData := map[string]string{}
+	if otpType == "max" {
+		formData = map[string]string{"code": code}
+	} else {
+		formData = map[string]string{"login": "true", "emailCode": code}
 	}
 
-	code, err := totp.GenerateCode(a.user.TotpSecret, time.Now())
-	if err != nil {
-		return customerrors.NewAuthError("totp_error", "Ошибка генерации TOTP кода", err)
-	}
-
-	twoAuthResp, err := a.client.R().
-		SetFormData(map[string]string{
-			"selectedCredentialId": matchCredId[1],
-			"otp":                  code,
-			"login":                "Вход",
-		}).
+	request := a.client.R().
+		SetFormData(formData).
+		SetHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.75.14 (KHTML, like Gecko) Version/7.0.3 Safari/7046A194A").
 		SetHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7").
-		SetHeader("Origin", "null").
-		Post(loginActionURL)
+		SetHeader("Origin", "null")
+
+	twoAuthResp, err := request.Post(loginActionURL)
 	if err != nil {
 		return customerrors.NewAuthError("site_unavailable", "Сайт MIREA недоступен", err)
 	}
 
-	redirects := twoAuthResp.RedirectHistory()
-	if len(redirects) == 0 {
-		return customerrors.NewAuthError("invalid_credentials", "Неверный логин или пароль от MIREA", errors.New("not redirected after two-factor authorization"))
+	if strings.Contains(twoAuthResp.String(), "\"summary\": \"Неверный код доступа.\"") {
+		loginActionURL, err = a.getLoginActionURL(twoAuthResp.String())
+		if err != nil {
+			return customerrors.NewAuthError("site_unavailable", "Не удалось получить новый loginActionUrl", err)
+		}
+
+		return customerrors.NewAuthError("otp_code_is_wrong", "Неверный код OTP", errors.New("введен неверный OTP код")).
+			SetLoginActionUrl(loginActionURL).SetOtpType(otpType)
 	}
 
-	if redirects[0].URL != "https://attendance-app.mirea.ru/services" {
-		return customerrors.NewAuthError("invalid_credentials", "Неверный логин или пароль от MIREA", errors.New("last redirect is "+redirects[0].URL))
+	if len(twoAuthResp.RedirectHistory()) == 0 {
+		return customerrors.NewAuthError("site_unavailable", "Ошибка авторизации через OTP", errors.New("twoAuthResp не вернул redirectHistory"))
+	}
+
+	urlMax := twoAuthResp.RedirectHistory()[0].URL
+	res, err := a.client.R().Get(urlMax)
+	if err != nil {
+		return err
+	}
+
+	loginActionURL, _ = a.getLoginActionURL(res.String())
+
+	if loginActionURL != "" {
+		res, err := a.client.R().
+			SetFormData(map[string]string{"skip": "true", "retry": ""}).
+			SetHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.75.14 (KHTML, like Gecko) Version/7.0.3 Safari/7046A194A").
+			SetHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7").
+			SetHeader("Origin", "null").
+			Post(loginActionURL)
+
+		if err != nil {
+			return customerrors.NewAuthError("site_unavailable", "", err)
+		}
+
+		for _, redirect := range res.RedirectHistory() {
+			_, _ = a.client.R().Get(redirect.URL)
+		}
+	}
+
+	if err = a.saveSessionToRedis(); err != nil {
+		return customerrors.NewAuthError("site_unavailable", "Ошибка сохранения сессии", err)
 	}
 
 	return nil

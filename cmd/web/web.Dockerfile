@@ -6,11 +6,7 @@ COPY go.* ./
 
 RUN go mod download
 
-COPY .env .env
-
-COPY pkg ./pkg
-COPY internal ./internal
-COPY cmd/web ./cmd/web
+COPY ../../ .
 
 RUN go build -v -o /app/web ./cmd/web/main.go
 

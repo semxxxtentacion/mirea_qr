@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mirea-qr/internal/config"
 	"mirea-qr/internal/entity"
 	"mirea-qr/internal/model"
 	"mirea-qr/internal/repository"
@@ -29,6 +30,7 @@ type MireaUseCase struct {
 	Redis     *redis.Client
 	Bot       *tgbotapi.BotAPI
 	Encryptor *crypto.Encryptor
+	Config    *config.Config
 
 	UserRepository              *repository.UserRepository
 	LinkUserRepository          *repository.LinkUserRepository
@@ -36,6 +38,7 @@ type MireaUseCase struct {
 }
 
 type WorkerQR struct {
+	config    *config.Config
 	users     []entity.User
 	mutex     sync.Mutex
 	wg        sync.WaitGroup
@@ -57,8 +60,9 @@ const (
 	STATUS_NOT_LESSON
 )
 
-func NewMireaUseCase(db *gorm.DB, logger *logrus.Logger, validate *validator.Validate, userRepository *repository.UserRepository, linkUserRepository *repository.LinkUserRepository, subjectAttendanceRepository *repository.SubjectAttendanceRepository, redis *redis.Client, bot *tgbotapi.BotAPI, encryptor *crypto.Encryptor) *MireaUseCase {
+func NewMireaUseCase(Cfg *config.Config, db *gorm.DB, logger *logrus.Logger, validate *validator.Validate, userRepository *repository.UserRepository, linkUserRepository *repository.LinkUserRepository, subjectAttendanceRepository *repository.SubjectAttendanceRepository, redis *redis.Client, bot *tgbotapi.BotAPI, encryptor *crypto.Encryptor) *MireaUseCase {
 	return &MireaUseCase{
+		Config:                      Cfg,
 		DB:                          db,
 		Log:                         logger,
 		Validate:                    validate,
@@ -104,7 +108,7 @@ func (c *MireaUseCase) GetDisciplines(user entity.User) (*model.DisciplinesRespo
 		return nil, err
 	}
 
-	attendance := mirea.NewAttendance(userWithDecryptedPassword, c.Redis)
+	attendance := mirea.NewAttendance(c.Config, userWithDecryptedPassword, c.Redis)
 	if err := attendance.Authorization(); err != nil {
 		return nil, fiber.NewError(403, "failed authorization")
 	}
@@ -211,7 +215,7 @@ func (c *MireaUseCase) GetLessons(user entity.User, request model.GetLessons) ([
 		return nil, err
 	}
 
-	attendance := mirea.NewAttendance(userWithDecryptedPassword, c.Redis)
+	attendance := mirea.NewAttendance(c.Config, userWithDecryptedPassword, c.Redis)
 	if err := attendance.Authorization(); err != nil {
 		return nil, fiber.NewError(403, "failed authorization")
 	}
@@ -295,7 +299,7 @@ func (c *MireaUseCase) Attendance(user entity.User, request model.AttendanceRequ
 		return nil, err
 	}
 
-	attendance := mirea.NewAttendance(userWithDecryptedPassword, c.Redis)
+	attendance := mirea.NewAttendance(c.Config, userWithDecryptedPassword, c.Redis)
 	if err := attendance.Authorization(); err != nil {
 		return nil, fiber.NewError(403, "failed authorization")
 	}
@@ -366,10 +370,11 @@ func (c *MireaUseCase) ScanQR(ctx context.Context, request *model.ScanQRRequest,
 	defer tx.Rollback()
 
 	worker := WorkerQR{
-		users: []entity.User{},
-		mutex: sync.Mutex{},
-		wg:    sync.WaitGroup{},
-		redis: c.Redis,
+		config: c.Config,
+		users:  []entity.User{},
+		mutex:  sync.Mutex{},
+		wg:     sync.WaitGroup{},
+		redis:  c.Redis,
 		response: &model.ScanQRResponse{
 			Students: map[string]uint{},
 		},
@@ -441,7 +446,7 @@ func (w *WorkerQR) Start() {
 			userWithDecryptedPassword := user
 			userWithDecryptedPassword.Password = decryptedPassword
 
-			attendance := mirea.NewAttendance(userWithDecryptedPassword, w.redis)
+			attendance := mirea.NewAttendance(w.config, userWithDecryptedPassword, w.redis)
 			if err := attendance.Authorization(); err != nil {
 				// не удалось авторизоваться
 				w.mutex.Lock()
