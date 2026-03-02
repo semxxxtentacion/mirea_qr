@@ -1,8 +1,11 @@
 package app
 
-import "github.com/sirupsen/logrus"
+import (
+	"github.com/sirupsen/logrus"
+	"mirea-qr/internal/config"
+)
 
-func NewLogger(cfg Config) *logrus.Logger {
+func NewLogger(cfg config.Config) *logrus.Logger {
 	log := logrus.New()
 
 	if cfg.Debug {

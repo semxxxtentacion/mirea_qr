@@ -51,15 +51,15 @@ func NewTelegram(telegramBotToken string, userUserCase *usecase.UserUseCase) fib
 
 		if webAppExists {
 			userUserCase.Log.Debugf("User web app field before handler: %s", webAppHash)
-			userId, err := validateWebAppUser(telegramBotToken, webAppHash)
+			userId, telegramHash, err := validateWebAppUser(telegramBotToken, webAppHash)
 			if err != nil {
 				userUserCase.Log.Warnf("Failed validate user web telegram : %s", err.Error())
 				return fiber.NewError(403, err.Error())
 			}
 
 			userUserCase.Log.Debugf("User TG : %+v", userId)
-
 			ctx.Locals("telegram_id", userId)
+			ctx.Locals("telegram_hash", telegramHash)
 		}
 
 		return ctx.Next()
@@ -75,15 +75,26 @@ func GetTelegramId(ctx fiber.Ctx) int64 {
 	return telegramId.(int64)
 }
 
-func validateWebAppUser(telegramBotToken string, data map[string]interface{}) (int64, error) {
+func GetTelegramHash(ctx fiber.Ctx) string {
+	h := ctx.Locals("telegram_hash")
+	if h == nil {
+		return ""
+	}
+	if s, ok := h.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func validateWebAppUser(telegramBotToken string, data map[string]interface{}) (int64, string, error) {
 	id, ok := data["id"].(float64)
 	if !ok {
-		return 0, errors.New("missed or invalid 'id' field")
+		return 0, "", errors.New("missed or invalid 'id' field")
 	}
 
 	hash, ok := data["hash"].(string)
 	if !ok || hash == "" {
-		return 0, errors.New("missed or invalid 'hash' field")
+		return 0, "", errors.New("missed or invalid 'hash' field")
 	}
 
 	delete(data, "hash")
@@ -107,7 +118,7 @@ func validateWebAppUser(telegramBotToken string, data map[string]interface{}) (i
 		case bool:
 			strValue = strconv.FormatBool(v)
 		default:
-			return 0, fmt.Errorf("unsupported type for key %s", key)
+			return 0, "", fmt.Errorf("unsupported type for key %s", key)
 		}
 
 		dataCheckString.WriteString(fmt.Sprintf("%s=%s\n", key, strValue))
@@ -121,8 +132,8 @@ func validateWebAppUser(telegramBotToken string, data map[string]interface{}) (i
 	expectedHash := hex.EncodeToString(hmachash.Sum(nil))
 
 	if hash != expectedHash {
-		return 0, errors.New("wrong hash")
+		return 0, "", errors.New("wrong hash")
 	}
 
-	return int64(id), nil
+	return int64(id), hash, nil
 }

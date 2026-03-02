@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"mirea-qr/internal/config"
 	"mirea-qr/internal/entity"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-func NewDatabase(cfg Config, log *logrus.Logger) *gorm.DB {
+func NewDatabase(cfg config.Config, log *logrus.Logger) *gorm.DB {
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%d sslmode=disable TimeZone=Europe/Moscow",
 		cfg.DatabaseHost,
 		cfg.DatabaseUser,

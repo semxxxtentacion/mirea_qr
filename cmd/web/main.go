@@ -3,11 +3,12 @@ package main
 import (
 	"fmt"
 	"mirea-qr/internal/app"
+	"mirea-qr/internal/config"
 	"mirea-qr/pkg/crypto"
 )
 
 func main() {
-	cfg := app.NewConfig()
+	cfg := config.NewConfig()
 	logger := app.NewLogger(cfg)
 	db := app.NewDatabase(cfg, logger)
 	fiber := app.NewFiber(cfg)

@@ -32,60 +32,59 @@ func (c *RouteConfig) Setup() {
 	c.App.Use(c.TelegramMiddleware)
 	//c.App.Use(c.DebugMiddleware)
 
-	c.SetupGuestRoute()
-	c.SetupAuthRoute()
-	c.SetupAdminRoute()
+	// Все API под префиксом /api (фронтенд обращается к /api/v1/...)
+	api := c.App.Group("/api")
+	c.SetupGuestRoute(api)
+	c.SetupAuthRoute(api)
+	c.SetupAdminRoute(api)
 }
 
-func (c *RouteConfig) SetupGuestRoute() {
-	c.App.Use(corsMiddleware())
-
-	c.App.Post("/v1/sign-up", c.UserController.Register)
+func (c *RouteConfig) SetupGuestRoute(api fiber.Router) {
+	api.Post("/v1/sign-up", c.UserController.Register)
+	api.Post("/v1/submit-otp", c.UserController.SubmitOtp)
 }
 
-func (c *RouteConfig) SetupAuthRoute() {
-	c.App.Use(c.RegisterMiddleware)
-	c.App.Use(corsMiddleware())
+func (c *RouteConfig) SetupAuthRoute(api fiber.Router) {
+	// Группа с RegisterMiddleware только для маршрутов, требующих авторизации.
+	// /v1/sign-up остаётся без этого middleware, иначе новый пользователь получит 403.
+	auth := api.Group("/v1", c.RegisterMiddleware)
 
-	c.App.Post("/v1/me", c.UserController.Me)
-	c.App.Post("/v1/change-password", c.UserController.ChangePassword)
-	c.App.Post("/v1/update-proxy", c.UserController.UpdateProxy)
-	c.App.Post("/v1/totp-secret", c.UserController.GetTotpSecret)
-	c.App.Post("/v1/update-totp-secret", c.UserController.UpdateTotpSecret)
-	c.App.Post("/v1/delete-user", c.UserController.DeleteUser)
-	c.App.Post("/v1/university-status", c.UserController.GetUniversityStatus)
+	auth.Post("/me", c.UserController.Me)
+	auth.Post("/change-password", c.UserController.ChangePassword)
+	auth.Post("/update-proxy", c.UserController.UpdateProxy)
+	auth.Post("/totp-secret", c.UserController.GetTotpSecret)
+	auth.Post("/update-totp-secret", c.UserController.UpdateTotpSecret)
+	auth.Post("/delete-user", c.UserController.DeleteUser)
+	auth.Post("/university-status", c.UserController.GetUniversityStatus)
 
-	c.App.Post("/v1/disciplines", c.MireaController.Disciplines)
-	c.App.Post("/v1/find-student", c.MireaController.FindStudent)
+	auth.Post("/disciplines", c.MireaController.Disciplines)
+	auth.Post("/find-student", c.MireaController.FindStudent)
 
-	c.App.Post("/v1/connect-student", c.UserController.ConnectStudent)
-	c.App.Post("/v1/list-connected-student", c.UserController.ListConnectedStudent)
-	c.App.Post("/v1/list-connected-to-user", c.UserController.ListConnectedToUser)
-	c.App.Post("/v1/enabled-connected-student", c.UserController.EnabledConnectedStudent)
-	c.App.Post("/v1/disconnect-student", c.UserController.DisconnectStudent)
-	c.App.Post("/v1/disconnect-from-user", c.UserController.DisconnectFromUser)
+	auth.Post("/connect-student", c.UserController.ConnectStudent)
+	auth.Post("/list-connected-student", c.UserController.ListConnectedStudent)
+	auth.Post("/list-connected-to-user", c.UserController.ListConnectedToUser)
+	auth.Post("/enabled-connected-student", c.UserController.EnabledConnectedStudent)
+	auth.Post("/disconnect-student", c.UserController.DisconnectStudent)
+	auth.Post("/disconnect-from-user", c.UserController.DisconnectFromUser)
 
-	c.App.Post("/v1/scan-qr", c.MireaController.ScanQR)
+	auth.Post("/scan-qr", c.MireaController.ScanQR)
 
-	c.App.Post("/v1/status-of-bypass", c.MireaController.CheckStatusBypass)
+	auth.Post("/status-of-bypass", c.MireaController.CheckStatusBypass)
 
-	c.App.Post("/v1/lessons", c.MireaController.GetLessons)
-	c.App.Post("/v1/attendance", c.MireaController.Attendance)
-	c.App.Post("/v1/deadlines", c.MireaController.Deadlines)
+	auth.Post("/lessons", c.MireaController.GetLessons)
+	auth.Post("/attendance", c.MireaController.Attendance)
+	auth.Post("/deadlines", c.MireaController.Deadlines)
 
 	// Отзывы на преподавателей
-	c.App.Post("/v1/reviews/teachers", c.ReviewController.ListTeachers)
-	c.App.Post("/v1/reviews/search-teacher", c.ReviewController.SearchTeacher)
-	c.App.Post("/v1/reviews/add-teacher", c.ReviewController.AddTeacher)
-	c.App.Post("/v1/reviews/list", c.ReviewController.GetReviews)
-	c.App.Post("/v1/reviews/create", c.ReviewController.CreateReview)
-	c.App.Post("/v1/reviews/delete", c.ReviewController.DeleteReview)
+	auth.Post("/reviews/teachers", c.ReviewController.ListTeachers)
+	auth.Post("/reviews/search-teacher", c.ReviewController.SearchTeacher)
+	auth.Post("/reviews/add-teacher", c.ReviewController.AddTeacher)
+	auth.Post("/reviews/list", c.ReviewController.GetReviews)
+	auth.Post("/reviews/create", c.ReviewController.CreateReview)
+	auth.Post("/reviews/delete", c.ReviewController.DeleteReview)
 }
 
-func (c *RouteConfig) SetupAdminRoute() {
-	c.App.Use(c.RegisterMiddleware)
-	c.App.Use(c.AdminMiddleware)
-	c.App.Use(corsMiddleware())
-
-	c.App.Post("/v1/admin/stats", c.AdminController.GetStats)
+func (c *RouteConfig) SetupAdminRoute(api fiber.Router) {
+	admin := api.Group("/v1/admin", c.RegisterMiddleware, c.AdminMiddleware)
+	admin.Post("/stats", c.AdminController.GetStats)
 }

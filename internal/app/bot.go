@@ -8,15 +8,16 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/redis/go-redis/v9"
 	"log"
+	"mirea-qr/internal/config"
 	"net/http"
 	"strconv"
 	"time"
 )
 
-func NewBot(cfg Config, redisClient *redis.Client) *tgbotapi.BotAPI {
+func NewBot(cfg config.Config, redisClient *redis.Client) *tgbotapi.BotAPI {
 	bot, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
 	if err != nil {
-		log.Panic(err)
+		log.Fatal("fatal error: отсутствует подключение к Telegram Bot API")
 	}
 
 	u := tgbotapi.NewUpdate(0)
@@ -62,12 +63,12 @@ func NewBot(cfg Config, redisClient *redis.Client) *tgbotapi.BotAPI {
 						"bot:daily_users:"+time.Now().Format("2006-01-02"),
 						strconv.FormatInt(update.Message.From.ID, 10))
 				}
-				
+
 				if update.CallbackQuery != nil {
-				    redisClient.SAdd(context.Background(),
-				        "bot:daily_users:"+time.Now().Format("2006-01-02"),
-					strconv.FormatInt(update.CallbackQuery.From.ID, 10))
-				} 
+					redisClient.SAdd(context.Background(),
+						"bot:daily_users:"+time.Now().Format("2006-01-02"),
+						strconv.FormatInt(update.CallbackQuery.From.ID, 10))
+				}
 			}
 		}
 	}(updates)
