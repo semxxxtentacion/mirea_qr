@@ -209,23 +209,14 @@ func (c *UserUseCase) savePendingOtp(ctx context.Context, key string, pending *m
 
 // SubmitOtp завершает регистрацию после ввода OTP: находит данные в Redis, отправляет код по ссылке, создаёт пользователя.
 func (c *UserUseCase) SubmitOtp(ctx context.Context, request *model.SubmitOtpRequest) (*model.UserResponse, error) {
-	if request.TelegramHash == "" {
-		return nil, fiber.NewError(400, "telegram_hash обязателен")
-	}
-	var key string
-	allDigits := true
-	for _, r := range request.TelegramHash {
-		if r < '0' || r > '9' {
-			allDigits = false
-			break
-		}
-	}
-	if allDigits {
-		key = otpPendingKeyPrefix + "id:" + request.TelegramHash
-	} else {
-		key = otpPendingKeyPrefix + request.TelegramHash
-	}
-	data, err := c.Redis.Get(ctx, key).Bytes()
+	if request.TelegramHash == "" && request.TelegramId == 0 {
+    return nil, fiber.NewError(400, "telegram_hash или telegram_id обязательны")
+  }
+  
+  // Используем ту же функцию генерации ключа, что и при сохранении
+  key := otpPendingKey(request.TelegramHash, request.TelegramId)
+  
+  data, err := c.Redis.Get(ctx, key).Bytes()
 	if err != nil {
 		c.Log.Warnf("Otp pending not found or expired: %+v", err)
 		return nil, fiber.NewError(404, "Сессия истекла или не найдена. Повторите вход.")
