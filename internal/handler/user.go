@@ -61,6 +61,9 @@ func (c *UserController) SubmitOtp(ctx fiber.Ctx) error {
 		c.Log.Warnf("Failed to parse submit-otp body: %+v", err)
 		return fiber.ErrBadRequest
 	}
+	request.TelegramId = middleware.GetTelegramId(ctx)
+  	request.TelegramHash = middleware.GetTelegramHash(ctx)
+	
 	if err := c.UseCase.Validate.Struct(request); err != nil {
 		return fiber.ErrBadRequest
 	}
