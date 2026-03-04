@@ -55,9 +55,7 @@ services:
       - default
       - global
     restart: always
-
-
-  redis:
+ redis:
     container_name: mirea-redis
     image: redis:latest
     environment:
@@ -105,3 +103,7 @@ networks:
     driver: bridge
   global:
     external: true
+
+
+
+
